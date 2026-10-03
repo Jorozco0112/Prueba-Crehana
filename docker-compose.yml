@@ -1,0 +1,89 @@
+x-api-image: &api-image
+  image: crehana-todo-api:latest
+  build:
+    context: .
+    target: runtime
+
+x-database-env: &database-env
+  POSTGRES_USER: todo
+  POSTGRES_PASSWORD: todo
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      <<: *database-env
+      POSTGRES_DB: todo
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todo -d todo"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  # Applies the migrations and exits; the API starts only if it succeeds (DEC-018).
+  migrate:
+    <<: *api-image
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://todo:todo@db:5432/todo
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *api-image
+    environment:
+      DATABASE_URL: postgresql+psycopg://todo:todo@db:5432/todo
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-local-development-secret-change-me-in-production}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-30}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- Test profile (DEC-035): `docker compose run --rm tests` -----------------------
+  db-test:
+    image: postgres:18
+    profiles: ["test"]
+    environment:
+      <<: *database-env
+      POSTGRES_DB: todo_test
+    ports:
+      - "${POSTGRES_TEST_PORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todo -d todo_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  tests:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://todo:todo@db-test:5432/todo_test
+      JWT_SECRET_KEY: test-secret-key-with-at-least-32-characters
+    depends_on:
+      db-test:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

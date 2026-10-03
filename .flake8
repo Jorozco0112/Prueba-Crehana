@@ -1,0 +1,16 @@
+[flake8]
+# Same line length as black.
+max-line-length = 88
+# Rules that contradict black's formatting:
+#   E203 whitespace before ':' (black formats slices like `items[a + 1 :]`)
+#   E701/E704 statement on the same line as `class`/`def` (black's `...` stubs)
+extend-ignore = E203, E701, E704
+max-complexity = 10
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    .mypy_cache,
+    .pytest_cache,
+    build,
+    dist
