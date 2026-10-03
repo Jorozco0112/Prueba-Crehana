@@ -188,3 +188,121 @@ incluir un campo con el porcentaje de completitud.
 **Consecuencias.** Una consulta adicional y barata (con índice en `list_id`) por cada listado.
 Si en el futuro hiciera falta optimizar, se guardarían contadores (`total`, `completed`), no el
 porcentaje.
+
+---
+
+## DEC-009 · Cuatro capas con dependencias hacia adentro
+
+**Contexto.** El enunciado exige una estructura limpia por capas (Domain, Application/Use
+Cases, Infrastructure).
+
+**Decisión.** Cuatro capas. Las dependencias solo apuntan hacia el centro:
+
+```
+entrypoints (FastAPI) ──┐
+                        ├──►  application  ──►  domain
+infrastructure (SQLA) ──┘
+```
+
+| Capa | Contiene | Puede importar |
+|---|---|---|
+| `domain` | Entidades, value objects y excepciones del dominio | Solo la biblioteca estándar |
+| `application` | Casos de uso e interfaces (puertos) de repositorios y servicios externos | `domain` |
+| `infrastructure` | Implementaciones de los puertos: SQLAlchemy, email simulado, JWT, hashing | `application`, `domain` |
+| `entrypoints` | Rutas FastAPI, schemas Pydantic, traducción de excepciones a HTTP | `application`, `domain` (e `infrastructure` solo para conectar dependencias, DEC-013) |
+
+**Alternativas descartadas.**
+- *Estructura plana por tipo de archivo (`routers/`, `models/`, `services/`)*: más simple, pero
+  mezcla reglas de negocio con detalles del framework y no permite probar casos de uso sin base
+  de datos.
+
+**Consecuencias.** Los casos de uso se prueban con implementaciones en memoria de los puertos.
+El cumplimiento de la regla se puede verificar revisando los imports de cada capa.
+
+---
+
+## DEC-010 · Dominio en Python puro; Pydantic en los bordes; mypy para el tipado
+
+**Contexto.** El enunciado pide "tipado fuerte con Pydantic" y, a la vez, una capa de dominio
+independiente.
+
+**Decisión.**
+- Entidades y value objects son clases normales de Python, sin dependencias externas.
+  `TaskStatus` y `Priority` son `Enum`.
+- Las entidades protegen su estado: los atributos con reglas (como `status`) son propiedades de
+  solo lectura y cambian únicamente a través de métodos (`change_status()`). Dos entidades son
+  iguales si tienen el mismo ID.
+- Pydantic se usa donde los datos entran o salen del sistema: schemas de request y response en
+  `entrypoints`.
+- El tipado estático de todas las capas se verifica con mypy en modo estricto.
+
+**Alternativas descartadas.**
+- *Entidades como modelos Pydantic*: acopla el dominio a una librería externa y mezcla la
+  validación de formato con las reglas de negocio.
+- *`dataclasses`*: también son biblioteca estándar, pero generan atributos públicos y
+  modificables, e igualdad por todos los campos. En las entidades habría que contrarrestar ambas
+  cosas; se prefieren clases explícitas.
+
+**Consecuencias.** `Task` tiene varias representaciones (entidad, modelo de base de datos,
+schemas de entrada y salida) y hace falta código que convierta entre ellas. Es el costo asumido
+de mantener el dominio aislado.
+
+---
+
+## DEC-011 · Puertos definidos en `application` con `ABC`
+
+**Contexto.** Los casos de uso necesitan persistencia y servicios externos sin depender de cómo
+están implementados.
+
+**Decisión.** Las interfaces de repositorios (`TaskRepository`, `TaskListRepository`,
+`UserRepository`) y de servicios externos (`EmailSender`, `PasswordHasher`, `TokenService`) se
+definen en `application` como clases abstractas (`ABC`).
+
+**Alternativas descartadas.**
+- *Interfaces en `domain`*: tiene sentido cuando las entidades usan los repositorios. Aquí solo
+  los usan los casos de uso, y la interfaz pertenece a quien la usa (inversión de dependencias).
+- *`typing.Protocol`*: más flexible, pero solo se verifica con mypy. `ABC` falla al instanciar
+  una implementación incompleta y declara explícitamente que la clase es un puerto.
+
+**Consecuencias.** Cada caso de uso puede probarse con implementaciones falsas de sus puertos.
+
+---
+
+## DEC-012 · Una clase por caso de uso, que devuelve entidades
+
+**Decisión.**
+- Cada caso de uso es una clase con un único método `execute()`, en su propio archivo.
+- Recibe en el constructor solo los puertos que necesita.
+- Recibe parámetros simples u objetos definidos en `application`, nunca los schemas HTTP.
+- Devuelve entidades del dominio. Para resultados compuestos (el listado con conteos y
+  porcentaje) devuelve una clase de resultado definida en `application`.
+- `entrypoints` convierte las entidades a schemas de respuesta con
+  `TaskResponse.model_validate(task, from_attributes=True)`.
+
+**Alternativas descartadas.**
+- *Servicios que agrupan métodos (`TaskService`)*: menos archivos, pero cada servicio acumula las
+  dependencias de todos sus métodos (cambiar el estado cargaría con el `EmailSender` de la
+  asignación) y tiende a crecer sin límite.
+- *Devolver DTOs de Pydantic desde `application`*: el contrato HTTP quedaría definido en los
+  casos de uso, y cambiar la respuesta de la API obligaría a modificarlos.
+
+**Consecuencias.** La carpeta de casos de uso describe lo que hace el sistema: cualquier
+ingeniero entiende qué hace cada archivo por su nombre. Se aceptan más archivos a cambio de esa
+claridad.
+
+---
+
+## DEC-013 · Conexión de dependencias con `Depends`, sin librería de inyección
+
+**Decisión.** Funciones en `entrypoints/api/dependencies.py` construyen cada caso de uso con
+sus implementaciones concretas, y las rutas los reciben mediante `Depends`. Es el único lugar
+del código que conoce todas las capas.
+
+**Alternativas descartadas.**
+- *Crear los objetos dentro de cada ruta*: la ruta conocería la infraestructura y no se podría
+  reemplazar en los tests.
+- *`dependency-injector` u otra librería*: dependencia extra y complejidad que no justifica una
+  quincena de casos de uso.
+
+**Consecuencias.** La sesión de base de datos vive lo que dura cada request. En los tests,
+cualquier dependencia se reemplaza con `app.dependency_overrides`.
